@@ -122,35 +122,65 @@ async function handleUniversalUpload(req, res) {
 }
 
 // Grafana Loki Logging Handler
+// Enhanced Grafana Loki Logging Handler to support custom Lua payloads
 async function handleLokiLogging(req, res) {
   try {
-    const { level = 'info', message, metadata = {}, source = 'fivem' } = req.body;
+    const body = req.body || {};
+
+    // 1. Extract core fields from Lua payload
+    const script = body.script || body.source || 'unknown_script';
+    const message = body.message || 'No message provided';
+    const event = body.event || 'ospecificerad';
+    
+    // Map custom FiveM log types ('normal' / 'important') to standard log levels
+    let level = body.level || body.type || 'info';
+    if (level === 'normal') level = 'info';
+    if (level === 'important') level = 'warn';
+
+    // 2. Extract player, args, and image data
+    const player = body.player || null;
+    const args = body.args || null;
+    const image = body.image || null;
+
+    // Generate nanosecond timestamp for Loki
     const nanoTimestamp = (BigInt(Date.now()) * 1000000n).toString();
 
+    // 3. Construct Loki Stream Payload
     const lokiPayload = {
       streams: [{
         stream: {
           app: 'fivem',
-          level: String(level),
-          source: String(source),
-          ...(metadata.resource ? { resource: String(metadata.resource) } : {})
+          script: String(script),
+          event: String(event),
+          level: String(level)
         },
         values: [[
           nanoTimestamp,
-          JSON.stringify(typeof message === 'object' ? { message, ...metadata } : { message, ...metadata })
+          JSON.stringify({
+            message,
+            script,
+            event,
+            level,
+            ...(player ? { player } : {}),
+            ...(args ? { args } : {}),
+            ...(image ? { image } : {}),
+            ...(body.metadata || {})
+          })
         ]]
       }]
     };
 
+    // 4. Push to Grafana Loki
     await axios.post(`${CONFIG.LOKI_URL}/loki/api/v1/push`, lokiPayload, {
       headers: { 'Content-Type': 'application/json' },
     });
 
+    // Returns { status: 'ok' } as expected by your Lua script
     return res.json({ status: 'ok' });
   } catch (err) {
     const errorMsg = err.response?.data?.error || err.message;
-    console.error('[Proxy Error] Loki:', errorMsg);
-    return res.status(500).json({ status: 'error', message: 'Loki push failed' });
+    console.error('[Proxy Error] Loki Push Failed:', errorMsg);
+    return res.status(500).json({ status: 'error', message: `Loki error: ${errorMsg}` });
   }
 }
 
