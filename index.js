@@ -16,8 +16,9 @@ app.use(express.text({ limit: '25mb' }));
 app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
 
 const CONFIG = {
-  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000', // Internal Docker container communication
-  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000', // External URL clients click/load
+  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000',
+  ZIPLINE_TOKEN: (process.env.ZIPLINE_TOKEN || '').trim(),
+  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000',
   LOKI_URL: process.env.LOKI_URL || 'http://localhost:3100',
   PORT: process.env.PORT || 8080,
   PUBLIC_URL: process.env.PUBLIC_URL || 'http://localhost:8080'
