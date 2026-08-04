@@ -4,11 +4,12 @@ const axios = require('axios');
 const FormData = require('form-data');
 const multer = require('multer');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // 25MB limit
 
-// Accept ALL payload types
+// Accept ALL payload types (JSON, Form Data, Text, and Raw Binary Blobs)
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -16,13 +17,24 @@ app.use(express.text({ limit: '25mb' }));
 app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
 
 const CONFIG = {
-  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000',
-  ZIPLINE_TOKEN: (process.env.ZIPLINE_TOKEN || '').trim(),
-  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000',
+  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000', // Internal Docker URL
+  ZIPLINE_TOKEN: (process.env.ZIPLINE_TOKEN || '').trim(), // Sanitized Zipline token
+  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000', // External Zipline URL
   LOKI_URL: process.env.LOKI_URL || 'http://localhost:3100',
   PORT: process.env.PORT || 8080,
-  PUBLIC_URL: process.env.PUBLIC_URL || 'http://localhost:8080'
+  PUBLIC_URL: process.env.PUBLIC_URL || 'http://192.168.8.6:8080'
 };
+
+// Map to store valid single-use upload tokens (Token -> Expiration Timestamp)
+const validTokens = new Map();
+
+// Automatically purge expired tokens every 60 seconds
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, expiresAt] of validTokens.entries()) {
+    if (now > expiresAt) validTokens.delete(token);
+  }
+}, 60000);
 
 // Helper to safely parse Zipline responses and convert internal Docker URLs to public URLs
 function parseZiplineResponse(filesArray) {
@@ -39,9 +51,37 @@ function parseZiplineResponse(filesArray) {
 }
 
 // ---------------------------------------------------------
+// MIDDLEWARE
+// ---------------------------------------------------------
+
+// One-time token validator for presigned uploads
+function validateOneTimeToken(req, res, next) {
+  const token = req.query.token;
+
+  if (token) {
+    if (!validTokens.has(token)) {
+      return res.status(403).json({ status: 'error', message: 'Invalid or already used presigned URL token' });
+    }
+
+    const expiresAt = validTokens.get(token);
+    validTokens.delete(token); // Burn token immediately after single use
+
+    if (Date.now() > expiresAt) {
+      return res.status(403).json({ status: 'error', message: 'Presigned URL token has expired' });
+    }
+  } else if (req.path.includes('/upload')) {
+    // Enforcement: /api/v*/upload endpoints MUST supply a valid presigned token
+    return res.status(403).json({ status: 'error', message: 'Missing presigned URL token' });
+  }
+
+  next();
+}
+
+// ---------------------------------------------------------
 // HANDLERS
 // ---------------------------------------------------------
 
+// Universal Upload Handler
 async function handleUniversalUpload(req, res) {
   try {
     const form = new FormData();
@@ -81,6 +121,7 @@ async function handleUniversalUpload(req, res) {
   }
 }
 
+// Grafana Loki Logging Handler
 async function handleLokiLogging(req, res) {
   try {
     const { level = 'info', message, metadata = {}, source = 'fivem' } = req.body;
@@ -116,21 +157,37 @@ async function handleLokiLogging(req, res) {
 // ---------------------------------------------------------
 // ROUTE MAPPING
 // ---------------------------------------------------------
+
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-proxy' }));
 
-app.get(['/api/v2/presigned-url', '/api/v3/presigned-url'], (req, res) => {
-  const version = req.path.includes('/v3/') ? 'v3' : 'v2';
-  return res.json({ status: 'ok', data: { presignedUrl: `${CONFIG.PUBLIC_URL}/api/${version}/upload` } });
+// Presigned URL Generation (Issues 60-second single-use token)
+app.get([
+  '/api/v2/presigned-url', '/api/v3/presigned-url',
+  '/api/v2/file/presigned-url', '/api/v3/file/presigned-url'
+], (req, res) => {
+  const token = crypto.randomBytes(16).toString('hex');
+  const version = req.path.includes('/v3') ? 'v3' : 'v2';
+
+  // Store token valid for 60 seconds (60,000 ms)
+  validTokens.set(token, Date.now() + 60000);
+
+  return res.json({
+    status: 'ok',
+    data: { presignedUrl: `${CONFIG.PUBLIC_URL}/api/${version}/upload?token=${token}` }
+  });
 });
 
+// Upload Routes (Protected by token validator)
 app.post([
   '/api/v2/upload', '/api/v3/upload',
   '/api/v2/file', '/api/v3/file',
   '/api/v2/file/base64', '/api/v3/file/base64'
-], upload.any(), handleUniversalUpload);
+], upload.any(), validateOneTimeToken, handleUniversalUpload);
 
+// Logging Routes
 app.post(['/api/v2/logs', '/api/v3/logs'], handleLokiLogging);
 
+// Metadata & Deletion Routes
 app.get(['/api/v2/file/:id', '/api/v3/file/:id'], async (req, res) => {
   return res.json({ status: 'ok', data: { id: req.params.id, url: `${CONFIG.ZIPLINE_PUBLIC_URL}/u/${req.params.id}` } });
 });
