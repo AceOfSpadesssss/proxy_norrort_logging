@@ -20,6 +20,15 @@ const CONFIG = {
   PUBLIC_URL: process.env.PUBLIC_URL || 'http://localhost:8080'
 };
 
+// Helper to safely parse Zipline v3 (string) and v4 (object) responses
+function parseZiplineResponse(filesArray) {
+  if (!filesArray || filesArray.length === 0) throw new Error("No file returned from Zipline");
+  const fileData = filesArray[0];
+  const url = typeof fileData === 'string' ? fileData : fileData.url;
+  const id = typeof fileData === 'string' ? url.split('/').pop() : fileData.id;
+  return { url, id };
+}
+
 // Health check for Docker/Portainer
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-proxy' }));
 
@@ -27,12 +36,7 @@ app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-p
  * 1. FIVEING/TGiann COMPATIBILITY: Presigned URL Generation
  */
 app.get('/api/v2/presigned-url', (req, res) => {
-  return res.json({
-    status: 'ok',
-    data: {
-      presignedUrl: `${CONFIG.PUBLIC_URL}/api/v2/upload`
-    }
-  });
+  return res.json({ status: 'ok', data: { presignedUrl: `${CONFIG.PUBLIC_URL}/api/v2/upload` } });
 });
 
 /**
@@ -61,18 +65,12 @@ app.post('/api/v2/upload', upload.any(), async (req, res) => {
       headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
     });
 
-    const imageUrl = ziplineRes.data.files[0];
-    
-    return res.json({
-      status: 'ok',
-      data: {
-        url: imageUrl,
-        id: imageUrl.split('/').pop()
-      }
-    });
+    const { url, id } = parseZiplineResponse(ziplineRes.data.files);
+    return res.json({ status: 'ok', data: { url, id } });
   } catch (err) {
-    console.error('[Proxy Error] Presigned Upload:', err.response?.data || err.message);
-    return res.status(500).json({ status: 'error', message: 'Zipline upload failed' });
+    const errorMsg = err.response?.data?.error || err.message;
+    console.error('[Proxy Error] Presigned Upload:', errorMsg);
+    return res.status(500).json({ status: 'error', message: `Zipline error: ${errorMsg}` });
   }
 });
 
@@ -96,11 +94,12 @@ app.post('/api/v3/file/base64', async (req, res) => {
       headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
     });
 
-    const imageUrl = ziplineRes.data.files[0];
-    return res.json({ status: 'ok', data: { id: imageUrl.split('/').pop(), url: imageUrl } });
+    const { url, id } = parseZiplineResponse(ziplineRes.data.files);
+    return res.json({ status: 'ok', data: { id, url } });
   } catch (err) {
-    console.error('[Proxy Error] Base64:', err.response?.data || err.message);
-    return res.status(500).json({ status: 'error', message: 'Zipline upload failed' });
+    const errorMsg = err.response?.data?.error || err.message;
+    console.error('[Proxy Error] Base64:', errorMsg);
+    return res.status(500).json({ status: 'error', message: `Zipline error: ${errorMsg}` });
   }
 });
 
@@ -121,11 +120,12 @@ app.post('/api/v3/file', upload.single('file'), async (req, res) => {
       headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
     });
 
-    const imageUrl = ziplineRes.data.files[0];
-    return res.json({ status: 'ok', data: { id: imageUrl.split('/').pop(), url: imageUrl } });
+    const { url, id } = parseZiplineResponse(ziplineRes.data.files);
+    return res.json({ status: 'ok', data: { id, url } });
   } catch (err) {
-    console.error('[Proxy Error] Multipart:', err.response?.data || err.message);
-    return res.status(500).json({ status: 'error', message: 'Zipline upload failed' });
+    const errorMsg = err.response?.data?.error || err.message;
+    console.error('[Proxy Error] Multipart:', errorMsg);
+    return res.status(500).json({ status: 'error', message: `Zipline error: ${errorMsg}` });
   }
 });
 
@@ -158,8 +158,41 @@ app.post('/api/v3/logs', async (req, res) => {
 
     return res.json({ status: 'ok' });
   } catch (err) {
-    console.error('[Proxy Error] Loki:', err.response?.data || err.message);
+    const errorMsg = err.response?.data?.error || err.message;
+    console.error('[Proxy Error] Loki:', errorMsg);
     return res.status(500).json({ status: 'error', message: 'Loki push failed' });
+  }
+});
+
+/**
+ * 6. EXTRA: Retrieve File Metadata (Mock/Compatibility)
+ */
+app.get('/api/v3/file/:id', async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    return res.json({
+      status: 'ok',
+      data: {
+        id: fileId,
+        url: `${CONFIG.ZIPLINE_URL}/u/${fileId}` // Zipline usually uses /u/ or /r/ depending on config
+      }
+    });
+  } catch (err) {
+    return res.status(404).json({ status: 'error', message: 'File not found' });
+  }
+});
+
+/**
+ * 7. EXTRA: Delete File (Mock/Compatibility)
+ */
+app.delete('/api/v3/file/:id', async (req, res) => {
+  try {
+    await axios.delete(`${CONFIG.ZIPLINE_URL}/api/user/files/${req.params.id}`, {
+      headers: { Authorization: CONFIG.ZIPLINE_TOKEN }
+    });
+    return res.json({ status: 'ok', message: 'File deleted' });
+  } catch (err) {
+    return res.status(500).json({ status: 'error', message: 'Failed to delete file' });
   }
 });
 
