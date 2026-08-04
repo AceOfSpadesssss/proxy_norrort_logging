@@ -17,7 +17,7 @@ const CONFIG = {
   ZIPLINE_TOKEN: process.env.ZIPLINE_TOKEN,
   LOKI_URL: process.env.LOKI_URL || 'http://localhost:3100',
   PORT: process.env.PORT || 8080,
-  PUBLIC_URL: process.env.PUBLIC_URL || 'http://localhost:8080' // Your proxy's external access URL/IP
+  PUBLIC_URL: process.env.PUBLIC_URL || 'http://localhost:8080'
 };
 
 // Health check for Docker/Portainer
@@ -25,12 +25,8 @@ app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-p
 
 /**
  * 1. FIVEING/TGiann COMPATIBILITY: Presigned URL Generation
- * This tricks tgiann-core into thinking it's talking to Fivemanage, 
- * but directs the upload endpoint back to this proxy.
  */
 app.get('/api/v2/presigned-url', (req, res) => {
-  // We generate a unique temporary token/id for this transaction if needed, 
-  // or just point straight to our upload route.
   return res.json({
     status: 'ok',
     data: {
@@ -41,24 +37,22 @@ app.get('/api/v2/presigned-url', (req, res) => {
 
 /**
  * 2. FIVEING/TGiann COMPATIBILITY: Upload Endpoint for Presigned URLs
- * Handles the actual screenshot file sent by tgiann-core and forwards it to Zipline.
  */
 app.post('/api/v2/upload', upload.any(), async (req, res) => {
   try {
-    // Check for file in multipart upload fields (usually 'file' or 'image' or raw body)
     const file = req.file || (req.files && req.files[0]);
-    
     const form = new FormData();
+
     if (file) {
       form.append('file', file.buffer, {
         filename: file.originalname || 'screenshot.png',
-        contentType: file.mimetype,
+        contentType: file.mimetype || 'image/png',
       });
-    } else if (req.body.image) {
-      // Handle base64 fallback just in case
-      const cleanBase64 = req.body.image.replace(/^data:image\/\w+;base64,/, '');
+    } else if (req.body.image || req.body.base64) {
+      const rawBase64 = req.body.image || req.body.base64;
+      const cleanBase64 = rawBase64.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(cleanBase64, 'base64');
-      form.append('file', buffer, { filename: 'screenshot.png' });
+      form.append('file', buffer, { filename: 'screenshot.png', contentType: 'image/png' });
     } else {
       return res.status(400).json({ status: 'error', message: 'No file payload found' });
     }
@@ -69,7 +63,6 @@ app.post('/api/v2/upload', upload.any(), async (req, res) => {
 
     const imageUrl = ziplineRes.data.files[0];
     
-    // Fivemanage-style response format expected by client callbacks
     return res.json({
       status: 'ok',
       data: {
@@ -88,14 +81,16 @@ app.post('/api/v2/upload', upload.any(), async (req, res) => {
  */
 app.post('/api/v3/file/base64', async (req, res) => {
   try {
-    const { base64, filename = 'screenshot.png' } = req.body;
-    if (!base64) return res.status(400).json({ status: 'error', message: 'Missing base64 payload' });
+    const { base64, image, filename = 'screenshot.png' } = req.body;
+    const targetBase64 = base64 || image;
+    
+    if (!targetBase64) return res.status(400).json({ status: 'error', message: 'Missing base64 payload' });
 
-    const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, '');
+    const cleanBase64 = targetBase64.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(cleanBase64, 'base64');
     
     const form = new FormData();
-    form.append('file', buffer, { filename });
+    form.append('file', buffer, { filename, contentType: 'image/png' });
 
     const ziplineRes = await axios.post(`${CONFIG.ZIPLINE_URL}/api/upload`, form, {
       headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
@@ -140,7 +135,6 @@ app.post('/api/v3/file', upload.single('file'), async (req, res) => {
 app.post('/api/v3/logs', async (req, res) => {
   try {
     const { level = 'info', message, metadata = {}, source = 'fivem' } = req.body;
-    
     const nanoTimestamp = (BigInt(Date.now()) * 1000000n).toString();
 
     const lokiPayload = {
@@ -166,40 +160,6 @@ app.post('/api/v3/logs', async (req, res) => {
   } catch (err) {
     console.error('[Proxy Error] Loki:', err.response?.data || err.message);
     return res.status(500).json({ status: 'error', message: 'Loki push failed' });
-  }
-});
-
-/**
- * 6. EXTRA: Retrieve File Metadata (Mock/Compatibility)
- */
-app.get('/api/v3/file/:id', async (req, res) => {
-  try {
-    // If a script tries to look up a file by ID, we can query Zipline or return a mock success
-    const fileId = req.params.id;
-    return res.json({
-      status: 'ok',
-      data: {
-        id: fileId,
-        url: `${CONFIG.ZIPLINE_URL}/r/${fileId}` // Adjust based on your Zipline domain structure
-      }
-    });
-  } catch (err) {
-    return res.status(404).json({ status: 'error', message: 'File not found' });
-  }
-});
-
-/**
- * 7. EXTRA: Delete File (Mock/Compatibility)
- */
-app.delete('/api/v3/file/:id', async (req, res) => {
-  try {
-    // Optional: Forward delete request to Zipline if your token allows it, or return success
-    await axios.delete(`${CONFIG.ZIPLINE_URL}/api/user/files/${req.params.id}`, {
-      headers: { Authorization: CONFIG.ZIPLINE_TOKEN }
-    });
-    return res.json({ status: 'ok', message: 'File deleted' });
-  } catch (err) {
-    return res.status(500).json({ status: 'error', message: 'Failed to delete file' });
   }
 });
 
