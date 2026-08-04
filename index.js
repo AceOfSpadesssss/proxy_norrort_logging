@@ -203,4 +203,16 @@ app.delete(['/api/v2/file/:id', '/api/v3/file/:id'], async (req, res) => {
   }
 });
 
+app.get('/u/:id', async (req, res) => {
+  try {
+    const imageRes = await axios.get(`${CONFIG.ZIPLINE_URL}/u/${req.params.id}`, {
+      responseType: 'stream'
+    });
+    res.setHeader('Content-Type', imageRes.headers['content-type'] || 'image/webp');
+    imageRes.data.pipe(res);
+  } catch (err) {
+    res.status(404).send('Image not found');
+  }
+});
+
 app.listen(CONFIG.PORT, () => console.log(`Proxy running on port ${CONFIG.PORT}`));
