@@ -169,4 +169,38 @@ app.post('/api/v3/logs', async (req, res) => {
   }
 });
 
+/**
+ * 6. EXTRA: Retrieve File Metadata (Mock/Compatibility)
+ */
+app.get('/api/v3/file/:id', async (req, res) => {
+  try {
+    // If a script tries to look up a file by ID, we can query Zipline or return a mock success
+    const fileId = req.params.id;
+    return res.json({
+      status: 'ok',
+      data: {
+        id: fileId,
+        url: `${CONFIG.ZIPLINE_URL}/r/${fileId}` // Adjust based on your Zipline domain structure
+      }
+    });
+  } catch (err) {
+    return res.status(404).json({ status: 'error', message: 'File not found' });
+  }
+});
+
+/**
+ * 7. EXTRA: Delete File (Mock/Compatibility)
+ */
+app.delete('/api/v3/file/:id', async (req, res) => {
+  try {
+    // Optional: Forward delete request to Zipline if your token allows it, or return success
+    await axios.delete(`${CONFIG.ZIPLINE_URL}/api/user/files/${req.params.id}`, {
+      headers: { Authorization: CONFIG.ZIPLINE_TOKEN }
+    });
+    return res.json({ status: 'ok', message: 'File deleted' });
+  } catch (err) {
+    return res.status(500).json({ status: 'error', message: 'Failed to delete file' });
+  }
+});
+
 app.listen(CONFIG.PORT, () => console.log(`Proxy running on port ${CONFIG.PORT}`));
