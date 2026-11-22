@@ -242,8 +242,22 @@ async function handleDiscordWebhook(req, res) {
     const files = req.files || [];
 
     if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
-      const payloadJson = req.body.payload_json || req.body.payload;
-      payload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : (payloadJson || {});
+      const rawPayloadJson = req.body.payload_json || req.body.payload;
+      if (typeof rawPayloadJson === 'string' && rawPayloadJson.trim().length > 0) {
+        try {
+          payload = JSON.parse(rawPayloadJson);
+        } catch (e) {
+          // Fallback: build from top-level multipart fields
+          payload = {
+            content: req.body.content,
+            username: req.body.username,
+            avatar_url: req.body.avatar_url,
+            embeds: req.body.embeds ? JSON.parse(req.body.embeds) : undefined
+          };
+        }
+      } else {
+        payload = rawPayloadJson || {};
+      }
     } else {
       payload = req.body || {};
     }
@@ -260,7 +274,7 @@ async function handleDiscordWebhook(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    let uploadedUrls = [];
+    const uploadedUrls = [];
 
     if (files && files.length > 0) {
       for (const file of files) {
@@ -269,16 +283,14 @@ async function handleDiscordWebhook(req, res) {
           filename: file.originalname || 'attachment',
           contentType: file.mimetype || 'application/octet-stream'
         });
-        try {
-          const ziplineRes = await axios.post(`${CONFIG.ZIPLINE_URL}/api/upload`, form, {
-            headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
-            timeout: AXIOS_TIMEOUT,
-          });
-          const { url } = parseZiplineResponse(ziplineRes.data.files);
-          uploadedUrls.push({ filename: file.originalname, url });
-        } catch (err) {
-          console.error('[Discord Webhook] Zipline upload failed:', safeError(err));
-        }
+
+        const ziplineRes = await axios.post(`${CONFIG.ZIPLINE_URL}/api/upload`, form, {
+          headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
+          timeout: AXIOS_TIMEOUT,
+        });
+
+        const { url } = parseZiplineResponse(ziplineRes.data.files);
+        uploadedUrls.push({ filename: file.originalname, url });
       }
     }
 
@@ -316,6 +328,7 @@ async function handleDiscordWebhook(req, res) {
     return res.status(400).json({ status: 'error', message: safeError(err) });
   }
 }
+
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-proxy' }));
 
