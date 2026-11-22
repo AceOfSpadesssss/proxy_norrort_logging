@@ -68,35 +68,45 @@ app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream
 const ipKey = rateLimit.ipKeyGenerator();
 
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: 60 * 1000, // 1 minute
+  max: 600, // 5/sec average with burst headroom, 
   keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: 'error', message: 'Too many requests, please try again later.' }
 });
 const presignedLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 10, keyGenerator: ipKey,
+  windowMs: 60 * 1000, // 1 minute
+  max: 150, // 5/sec average with burst headroom, 
+  keyGenerator: ipKey,
   standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many presigned URL requests.' }
 });
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 30, keyGenerator: ipKey,
+  windowMs: 60 * 1000, // 1 minute
+  max: 150, // 5/sec average with burst headroom, 
+  keyGenerator: ipKey,
   standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many upload requests.' }
 });
 const logsLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 60, keyGenerator: ipKey,
+  windowMs: 60 * 1000, // 1 minute
+  max: 300, // 5/sec average with burst headroom, 
+  keyGenerator: ipKey,
   standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many log requests.' }
 });
 const webhookLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 60, keyGenerator: ipKey,
+  windowMs: 60 * 1000, // 1 minute
+  max: 300, // 5/sec average with burst headroom, 
+  keyGenerator: ipKey,
   standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many webhook requests.' }
 });
 const deleteLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 10, keyGenerator: ipKey,
+  windowMs: 60 * 1000, // 1 minute
+  max: 20, // 5/sec average with burst headroom, 
+  keyGenerator: ipKey,
   standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many delete requests.' }
 });
