@@ -5,9 +5,9 @@ const FormData = require('form-data');
 const multer = require('multer');
 const cors = require('cors');
 const crypto = require('crypto');
+const path = require('path');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
-const path = require('path');
 
 const app = express();
 const upload = multer({ 
@@ -20,10 +20,6 @@ const upload = multer({
     else cb(new Error('Only image files are allowed'));
   }
 });
-
-// ---------------------------------------------------------
-// CONFIG
-// ---------------------------------------------------------
 
 const CONFIG = {
   ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000',
@@ -45,10 +41,6 @@ setInterval(() => {
     if (now > expiresAt) validTokens.delete(token);
   }
 }, 60000);
-
-// ---------------------------------------------------------
-// SECURITY MIDDLEWARE
-// ---------------------------------------------------------
 
 app.use(helmet());
 app.use(helmet.crossOriginEmbedderPolicy({ policy: 'require-corp' }));
@@ -73,62 +65,40 @@ app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(express.text({ limit: '25mb' }));
 app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
 
-// ---------------------------------------------------------
-// RATE LIMITING
-// ---------------------------------------------------------
-
 const ipKey = (req) => req.ip || req.connection.remoteAddress || 'unknown';
 
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  keyGenerator: ipKey,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 100, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many requests, please try again later.' }
 });
-
 const presignedLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  keyGenerator: ipKey,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 10, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many presigned URL requests.' }
 });
-
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  keyGenerator: ipKey,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 30, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many upload requests.' }
 });
-
 const logsLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 60,
-  keyGenerator: ipKey,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 60, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many log requests.' }
 });
-
+const webhookLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 60, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
+  message: { status: 'error', message: 'Too many webhook requests.' }
+});
 const deleteLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  keyGenerator: ipKey,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 10, keyGenerator: ipKey,
+  standardHeaders: true, legacyHeaders: false,
   message: { status: 'error', message: 'Too many delete requests.' }
 });
 
 app.use(generalLimiter);
-
-// ---------------------------------------------------------
-// AUTH MIDDLEWARE
-// ---------------------------------------------------------
 
 function requireApiKey(req, res, next) {
   if (!CONFIG.PROXY_API_KEY) return next();
@@ -138,10 +108,6 @@ function requireApiKey(req, res, next) {
   }
   return res.status(401).json({ status: 'error', message: 'Unauthorized' });
 }
-
-// ---------------------------------------------------------
-// HELPERS
-// ---------------------------------------------------------
 
 function parseZiplineResponse(filesArray) {
   if (!filesArray || filesArray.length === 0) throw new Error('No file returned from Zipline');
@@ -155,10 +121,6 @@ function parseZiplineResponse(filesArray) {
 function safeError(err) {
   return err.response?.data?.error || err.message || 'Internal error';
 }
-
-// ---------------------------------------------------------
-// TOKEN VALIDATOR
-// ---------------------------------------------------------
 
 function validateOneTimeToken(req, res, next) {
   const token = req.query.token;
@@ -176,10 +138,6 @@ function validateOneTimeToken(req, res, next) {
   }
   next();
 }
-
-// ---------------------------------------------------------
-// HANDLERS
-// ---------------------------------------------------------
 
 async function handleUniversalUpload(req, res) {
   try {
@@ -223,14 +181,16 @@ async function handleUniversalUpload(req, res) {
 async function handleLokiLogging(req, res) {
   try {
     const body = req.body || {};
-    const script = String(body.script || body.source || 'unknown_script');
+
+    const script = String(body.script || 'norrort_logging');
     const message = String(body.message || 'No message provided');
     const event = String(body.event || 'ospecificerad');
-    let level = String(body.level || body.type || 'info');
-    if (level === 'normal') level = 'info';
-    if (level === 'important') level = 'warn';
+    const type = String(body.type || 'normal');
 
-    const player = body.player || null;
+    let level = 'info';
+    if (type === 'important') level = 'warn';
+
+    const player = body.player && typeof body.player === 'object' ? body.player : null;
     const args = body.args || null;
     const image = body.image || null;
 
@@ -240,16 +200,22 @@ async function handleLokiLogging(req, res) {
       message,
       script,
       event,
+      type,
       level,
       ...(player ? { player } : {}),
       ...(args ? { args } : {}),
       ...(image ? { image } : {}),
-      ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {})
     };
 
     const lokiPayload = {
       streams: [{
-        stream: { app: 'fivem', script, event, level },
+        stream: {
+          app: 'fivem',
+          script,
+          event,
+          type,
+          level,
+        },
         values: [[nanoTimestamp, JSON.stringify(logEntry)]]
       }]
     };
@@ -261,14 +227,92 @@ async function handleLokiLogging(req, res) {
 
     return res.json({ status: 'ok' });
   } catch (err) {
-    console.error('[Proxy Error] Loki Push Failed:', safeError(err));
-    return res.status(500).json({ status: 'error', message: 'Loki push failed' });
+    const errorMsg = err.response?.data?.error || err.message;
+    console.error('[Proxy Error] Loki Push Failed:', errorMsg);
+    return res.status(500).json({ status: 'error', message: `Loki error: ${errorMsg}` });
   }
 }
 
-// ---------------------------------------------------------
-// ROUTES
-// ---------------------------------------------------------
+async function handleDiscordWebhook(req, res) {
+  try {
+    let payload;
+    const files = req.files || [];
+
+    if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+      const payloadJson = req.body.payload_json || req.body.payload;
+      payload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : (payloadJson || {});
+    } else {
+      payload = req.body || {};
+    }
+
+    const { content, embeds, username, avatar_url } = payload;
+
+    const logEntry = {
+      source: 'discord_webhook',
+      webhookId: req.params.webhookId,
+      username: username || 'Unknown',
+      avatar_url: avatar_url || null,
+      content: content || '',
+      embeds: embeds || [],
+      timestamp: new Date().toISOString()
+    };
+
+    let uploadedUrls = [];
+
+    if (files && files.length > 0) {
+      for (const file of files) {
+        const form = new FormData();
+        form.append('file', file.buffer, {
+          filename: file.originalname || 'attachment',
+          contentType: file.mimetype || 'application/octet-stream'
+        });
+        try {
+          const ziplineRes = await axios.post(`${CONFIG.ZIPLINE_URL}/api/upload`, form, {
+            headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
+            timeout: AXIOS_TIMEOUT,
+          });
+          const { url } = parseZiplineResponse(ziplineRes.data.files);
+          uploadedUrls.push({ filename: file.originalname, url });
+        } catch (err) {
+          console.error('[Discord Webhook] Zipline upload failed:', safeError(err));
+        }
+      }
+    }
+
+    if (uploadedUrls.length > 0) {
+      logEntry.attachments = uploadedUrls;
+    }
+
+    const nanoTimestamp = (BigInt(Date.now()) * 1000000n).toString();
+    const lokiPayload = {
+      streams: [{
+        stream: { app: 'fivem', script: 'discord_webhook', event: 'webhook', type: 'normal', level: 'info' },
+        values: [[nanoTimestamp, JSON.stringify(logEntry)]]
+      }]
+    };
+
+    try {
+      await axios.post(`${CONFIG.LOKI_URL}/loki/api/v1/push`, lokiPayload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: AXIOS_TIMEOUT,
+      });
+    } catch (err) {
+      console.error('[Discord Webhook] Loki push failed:', safeError(err));
+    }
+
+    return res.status(200).json({
+      id: crypto.randomBytes(8).toString('hex'),
+      content: content || '',
+      channel_id: null,
+      author: { username: username || 'Webhook', avatar_url: avatar_url || null },
+      embeds: embeds || [],
+      attachments: uploadedUrls.map(u => ({ url: u.url, filename: u.filename }))
+    });
+  } catch (err) {
+    console.error('[Discord Webhook] Error:', safeError(err));
+    return res.status(400).json({ status: 'error', message: safeError(err) });
+  }
+}
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-proxy' }));
 
@@ -321,5 +365,7 @@ app.get('/u/:id', async (req, res) => {
     res.status(404).send('Image not found');
   }
 });
+
+app.post('/api/webhooks/:webhookId/:webhookToken', webhookLimiter, upload.any(), handleDiscordWebhook);
 
 app.listen(CONFIG.PORT, () => console.log(`Proxy running on port ${CONFIG.PORT}`));
