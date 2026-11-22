@@ -220,7 +220,7 @@ async function handleLokiLogging(req, res) {
       ...(image ? { image } : {}),
     };
 
-    const lokiPayload = {
+    /* const lokiPayload = {
       streams: [{
         stream: {
           app: 'fivem',
@@ -228,6 +228,14 @@ async function handleLokiLogging(req, res) {
           event,
           type,
           level,
+        },
+        values: [[nanoTimestamp, JSON.stringify(logEntry)]]
+      }]
+    }; */
+    const lokiPayload = {
+      streams: [{
+        stream: {
+          app: 'fivem',
         },
         values: [[nanoTimestamp, JSON.stringify(logEntry)]]
       }]
