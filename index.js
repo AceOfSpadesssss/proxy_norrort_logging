@@ -5,30 +5,40 @@ const FormData = require('form-data');
 const multer = require('multer');
 const cors = require('cors');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const path = require('path');
 
 const app = express();
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // 25MB limit
+const upload = multer({ 
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = /jpeg|jpg|png|webp|gif/;
+    const mimeOk = allowedMimes.test(file.mimetype);
+    const extOk = allowedMimes.test(path.extname(file.originalname).toLowerCase());
+    if (mimeOk && extOk) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  }
+});
 
-// Accept ALL payload types (JSON, Form Data, Text, and Raw Binary Blobs)
-app.use(cors());
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
-app.use(express.text({ limit: '25mb' }));
-app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
+// ---------------------------------------------------------
+// CONFIG
+// ---------------------------------------------------------
 
 const CONFIG = {
-  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000', // Internal Docker URL
-  ZIPLINE_TOKEN: (process.env.ZIPLINE_TOKEN || '').trim(), // Sanitized Zipline token
-  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000', // External Zipline URL
+  ZIPLINE_URL: process.env.ZIPLINE_URL || 'http://localhost:3000',
+  ZIPLINE_TOKEN: (process.env.ZIPLINE_TOKEN || '').trim(),
+  ZIPLINE_PUBLIC_URL: process.env.ZIPLINE_PUBLIC_URL || 'http://192.168.8.6:3000',
   LOKI_URL: process.env.LOKI_URL || 'http://localhost:3100',
   PORT: process.env.PORT || 8080,
-  PUBLIC_URL: process.env.PUBLIC_URL || 'http://192.168.8.6:8080'
+  PUBLIC_URL: process.env.PUBLIC_URL || 'http://192.168.8.6:8080',
+  PROXY_API_KEY: process.env.PROXY_API_KEY || '',
+  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
 };
 
-// Map to store valid single-use upload tokens (Token -> Expiration Timestamp)
-const validTokens = new Map();
+const AXIOS_TIMEOUT = 10000;
 
-// Automatically purge expired tokens every 60 seconds
+const validTokens = new Map();
 setInterval(() => {
   const now = Date.now();
   for (const [token, expiresAt] of validTokens.entries()) {
@@ -36,44 +46,134 @@ setInterval(() => {
   }
 }, 60000);
 
-// Helper to safely parse Zipline responses and convert internal Docker URLs to public URLs
-function parseZiplineResponse(filesArray) {
-  if (!filesArray || filesArray.length === 0) throw new Error("No file returned from Zipline");
-  const fileData = filesArray[0];
-  
-  const rawUrl = typeof fileData === 'string' ? fileData : fileData.url;
-  const id = typeof fileData === 'string' ? rawUrl.split('/').pop() : fileData.id;
+// ---------------------------------------------------------
+// SECURITY MIDDLEWARE
+// ---------------------------------------------------------
 
-  // Replace internal Docker container host with public Zipline URL
-  const publicUrl = rawUrl.replace(CONFIG.ZIPLINE_URL, CONFIG.ZIPLINE_PUBLIC_URL);
+app.use(helmet());
+app.use(helmet.crossOriginEmbedderPolicy({ policy: 'require-corp' }));
 
-  return { url: publicUrl, id };
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (CONFIG.ALLOWED_ORIGINS.length === 0 || CONFIG.ALLOWED_ORIGINS.includes(origin)) {
+      return cb(null, true);
+    }
+    return cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Requested-With'],
+  maxAge: 86400
+};
+app.use(cors(corsOptions));
+
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(express.text({ limit: '25mb' }));
+app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
+
+// ---------------------------------------------------------
+// RATE LIMITING
+// ---------------------------------------------------------
+
+const ipKey = (req) => req.ip || req.connection.remoteAddress || 'unknown';
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many requests, please try again later.' }
+});
+
+const presignedLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many presigned URL requests.' }
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many upload requests.' }
+});
+
+const logsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many log requests.' }
+});
+
+const deleteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many delete requests.' }
+});
+
+app.use(generalLimiter);
+
+// ---------------------------------------------------------
+// AUTH MIDDLEWARE
+// ---------------------------------------------------------
+
+function requireApiKey(req, res, next) {
+  if (!CONFIG.PROXY_API_KEY) return next();
+  const key = req.headers['x-api-key'] || req.headers['authorization'];
+  if (key && key.replace(/^Bearer\s/i, '') === CONFIG.PROXY_API_KEY) {
+    return next();
+  }
+  return res.status(401).json({ status: 'error', message: 'Unauthorized' });
 }
 
 // ---------------------------------------------------------
-// MIDDLEWARE
+// HELPERS
 // ---------------------------------------------------------
 
-// One-time token validator for presigned uploads
+function parseZiplineResponse(filesArray) {
+  if (!filesArray || filesArray.length === 0) throw new Error('No file returned from Zipline');
+  const fileData = filesArray[0];
+  const rawUrl = typeof fileData === 'string' ? fileData : fileData.url;
+  const id = typeof fileData === 'string' ? rawUrl.split('/').pop() : fileData.id;
+  const publicUrl = rawUrl.replace(CONFIG.ZIPLINE_URL, CONFIG.ZIPLINE_PUBLIC_URL);
+  return { url: publicUrl, id };
+}
+
+function safeError(err) {
+  return err.response?.data?.error || err.message || 'Internal error';
+}
+
+// ---------------------------------------------------------
+// TOKEN VALIDATOR
+// ---------------------------------------------------------
+
 function validateOneTimeToken(req, res, next) {
   const token = req.query.token;
-
   if (token) {
     if (!validTokens.has(token)) {
       return res.status(403).json({ status: 'error', message: 'Invalid or already used presigned URL token' });
     }
-
     const expiresAt = validTokens.get(token);
-    validTokens.delete(token); // Burn token immediately after single use
-
+    validTokens.delete(token);
     if (Date.now() > expiresAt) {
       return res.status(403).json({ status: 'error', message: 'Presigned URL token has expired' });
     }
   } else if (req.path.includes('/upload')) {
-    // Enforcement: /api/v*/upload endpoints MUST supply a valid presigned token
     return res.status(403).json({ status: 'error', message: 'Missing presigned URL token' });
   }
-
   next();
 }
 
@@ -81,7 +181,6 @@ function validateOneTimeToken(req, res, next) {
 // HANDLERS
 // ---------------------------------------------------------
 
-// Universal Upload Handler
 async function handleUniversalUpload(req, res) {
   try {
     const form = new FormData();
@@ -110,122 +209,99 @@ async function handleUniversalUpload(req, res) {
 
     const ziplineRes = await axios.post(`${CONFIG.ZIPLINE_URL}/api/upload`, form, {
       headers: { ...form.getHeaders(), Authorization: CONFIG.ZIPLINE_TOKEN },
+      timeout: AXIOS_TIMEOUT,
     });
 
     const { url, id } = parseZiplineResponse(ziplineRes.data.files);
     return res.json({ status: 'ok', data: { url, id } });
   } catch (err) {
-    const errorMsg = err.response?.data?.error || err.message;
-    console.error('[Proxy Error] Upload Failed:', errorMsg);
-    return res.status(500).json({ status: 'error', message: `Zipline error: ${errorMsg}` });
+    console.error('[Proxy Error] Upload Failed:', safeError(err));
+    return res.status(500).json({ status: 'error', message: 'Zipline upload failed' });
   }
 }
 
-// Grafana Loki Logging Handler
-// Enhanced Grafana Loki Logging Handler to support custom Lua payloads
 async function handleLokiLogging(req, res) {
   try {
     const body = req.body || {};
-
-    // 1. Extract core fields from Lua payload
-    const script = body.script || body.source || 'unknown_script';
-    const message = body.message || 'No message provided';
-    const event = body.event || 'ospecificerad';
-    
-    // Map custom FiveM log types ('normal' / 'important') to standard log levels
-    let level = body.level || body.type || 'info';
+    const script = String(body.script || body.source || 'unknown_script');
+    const message = String(body.message || 'No message provided');
+    const event = String(body.event || 'ospecificerad');
+    let level = String(body.level || body.type || 'info');
     if (level === 'normal') level = 'info';
     if (level === 'important') level = 'warn';
 
-    // 2. Extract player, args, and image data
     const player = body.player || null;
     const args = body.args || null;
     const image = body.image || null;
 
-    // Generate nanosecond timestamp for Loki
     const nanoTimestamp = (BigInt(Date.now()) * 1000000n).toString();
 
-    // 3. Construct Loki Stream Payload
+    const logEntry = {
+      message,
+      script,
+      event,
+      level,
+      ...(player ? { player } : {}),
+      ...(args ? { args } : {}),
+      ...(image ? { image } : {}),
+      ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {})
+    };
+
     const lokiPayload = {
       streams: [{
-        stream: {
-          app: 'fivem',
-          script: String(script),
-          event: String(event),
-          level: String(level)
-        },
-        values: [[
-          nanoTimestamp,
-          JSON.stringify({
-            message,
-            script,
-            event,
-            level,
-            ...(player ? { player } : {}),
-            ...(args ? { args } : {}),
-            ...(image ? { image } : {}),
-            ...(body.metadata || {})
-          })
-        ]]
+        stream: { app: 'fivem', script, event, level },
+        values: [[nanoTimestamp, JSON.stringify(logEntry)]]
       }]
     };
 
-    // 4. Push to Grafana Loki
     await axios.post(`${CONFIG.LOKI_URL}/loki/api/v1/push`, lokiPayload, {
       headers: { 'Content-Type': 'application/json' },
+      timeout: AXIOS_TIMEOUT,
     });
 
-    // Returns { status: 'ok' } as expected by your Lua script
     return res.json({ status: 'ok' });
   } catch (err) {
-    const errorMsg = err.response?.data?.error || err.message;
-    console.error('[Proxy Error] Loki Push Failed:', errorMsg);
-    return res.status(500).json({ status: 'error', message: `Loki error: ${errorMsg}` });
+    console.error('[Proxy Error] Loki Push Failed:', safeError(err));
+    return res.status(500).json({ status: 'error', message: 'Loki push failed' });
   }
 }
 
 // ---------------------------------------------------------
-// ROUTE MAPPING
+// ROUTES
 // ---------------------------------------------------------
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'fivemanage-proxy' }));
 
-// Presigned URL Generation (Issues 60-second single-use token)
 app.get([
   '/api/v2/presigned-url', '/api/v3/presigned-url',
   '/api/v2/file/presigned-url', '/api/v3/file/presigned-url'
-], (req, res) => {
+], presignedLimiter, (req, res) => {
   const token = crypto.randomBytes(16).toString('hex');
   const version = req.path.includes('/v3') ? 'v3' : 'v2';
-
-  // Store token valid for 60 seconds (60,000 ms)
   validTokens.set(token, Date.now() + 60000);
-
   return res.json({
     status: 'ok',
     data: { presignedUrl: `${CONFIG.PUBLIC_URL}/api/${version}/upload?token=${token}` }
   });
 });
 
-// Upload Routes (Protected by token validator)
 app.post([
   '/api/v2/upload', '/api/v3/upload',
   '/api/v2/file', '/api/v3/file',
   '/api/v2/file/base64', '/api/v3/file/base64'
-], upload.any(), validateOneTimeToken, handleUniversalUpload);
+], uploadLimiter, upload.any(), validateOneTimeToken, handleUniversalUpload);
 
-// Logging Routes
-app.post(['/api/v2/logs', '/api/v3/logs'], handleLokiLogging);
+app.post(['/api/v2/logs', '/api/v3/logs'], logsLimiter, requireApiKey, handleLokiLogging);
 
-// Metadata & Deletion Routes
 app.get(['/api/v2/file/:id', '/api/v3/file/:id'], async (req, res) => {
   return res.json({ status: 'ok', data: { id: req.params.id, url: `${CONFIG.ZIPLINE_PUBLIC_URL}/u/${req.params.id}` } });
 });
 
-app.delete(['/api/v2/file/:id', '/api/v3/file/:id'], async (req, res) => {
+app.delete(['/api/v2/file/:id', '/api/v3/file/:id'], deleteLimiter, requireApiKey, async (req, res) => {
   try {
     await axios.delete(`${CONFIG.ZIPLINE_URL}/api/user/files/${req.params.id}`, { 
-      headers: { Authorization: CONFIG.ZIPLINE_TOKEN } 
+      headers: { Authorization: CONFIG.ZIPLINE_TOKEN },
+      timeout: AXIOS_TIMEOUT,
     });
     return res.json({ status: 'ok', message: 'File deleted' });
   } catch (err) {
@@ -236,7 +312,8 @@ app.delete(['/api/v2/file/:id', '/api/v3/file/:id'], async (req, res) => {
 app.get('/u/:id', async (req, res) => {
   try {
     const imageRes = await axios.get(`${CONFIG.ZIPLINE_URL}/u/${req.params.id}`, {
-      responseType: 'stream'
+      responseType: 'stream',
+      timeout: AXIOS_TIMEOUT,
     });
     res.setHeader('Content-Type', imageRes.headers['content-type'] || 'image/webp');
     imageRes.data.pipe(res);
