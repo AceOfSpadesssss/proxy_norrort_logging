@@ -65,11 +65,14 @@ app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(express.text({ limit: '25mb' }));
 app.use(express.raw({ limit: '25mb', type: ['image/*', 'application/octet-stream'] }));
 
-const ipKey = (req) => req.ip || req.connection.remoteAddress || 'unknown';
+const ipKey = rateLimit.ipKeyGenerator();
 
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100, keyGenerator: ipKey,
-  standardHeaders: true, legacyHeaders: false,
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { status: 'error', message: 'Too many requests, please try again later.' }
 });
 const presignedLimiter = rateLimit({
